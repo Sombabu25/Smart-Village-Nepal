@@ -1,0 +1,14 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap');
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --P:#0d3b6e;--P2:#1565c0;--A:#d84315;
+  --surface:#f0f4fa;--card:#ffffff;--border:#dce4f0;
+  --text:#111827;--muted:#6b7a99;
+  --shadow:0 1px 6px rgba(13,59,110,0.09);
+  --shadow-md:0 4px 18px rgba(13,59,110,0.13);
+}
+body{font-family:'DM Sans',sans-serif;background:var(--surface);color:var(--text);min-height:100vh;}
+.np{font-family:'Noto Sans Devanagari','DM Sans',sans-serif;}
+button{font-family:'DM Sans',sans-serif;cursor:pointer;border:none;outline:none;}
+input,textarea,select{font-family:'DM Sans',sans-serif;outline:none;}
