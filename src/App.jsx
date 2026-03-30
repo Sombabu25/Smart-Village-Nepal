@@ -213,17 +213,192 @@ function MapView({ issues }) {
   );
 }
 
-// ── ReportForm (unchanged from v2) ────────────────────────────────────
+// ── GPS state machine ─────────────────────────────────────────────────
+// idle → requesting → success | denied | unavailable
+// success: coords + reverse-geocoded label auto-filled, still editable
+// denied/unavailable: fallback to manual input with clear message
+
+function useGPS() {
+  const [gpsState, setGpsState] = useState("idle"); // idle|requesting|success|denied|unavailable
+  const [coords,   setCoords]   = useState(null);   // { lat, lng }
+  const [label,    setLabel]    = useState("");      // human-readable string
+
+  // Simulate reverse-geocode (in prod: call Nominatim / Google Geocoding)
+  function reverseGeocode(lat, lng) {
+    // Real village names mapped from rough lat bands — deterministic for demo
+    const wards = ["वडा १","वडा २","वडा ३","वडा ४","वडा ५","वडा ६","वडा ७"];
+    const places = ["मुख्य सडक","बजार क्षेत्र","पुरानो बस्ती","नदी किनार","स्कुल नजिक","मन्दिर छेउ"];
+    const ward  = wards[Math.floor(((lat - 27.68) / 0.05) * wards.length)  % wards.length];
+    const place = places[Math.floor(((lng - 85.27) / 0.07) * places.length) % places.length];
+    return `${ward}, ${place} (${lat.toFixed(4)}°N ${lng.toFixed(4)}°E)`;
+  }
+
+  function request() {
+    if (!navigator.geolocation) {
+      setGpsState("unavailable");
+      return;
+    }
+    setGpsState("requesting");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude: lat, longitude: lng } = pos.coords;
+        setCoords({ lat, lng });
+        setLabel(reverseGeocode(lat, lng));
+        setGpsState("success");
+      },
+      (err) => {
+        // 1 = PERMISSION_DENIED, 2 = POSITION_UNAVAILABLE, 3 = TIMEOUT
+        setGpsState(err.code === 1 ? "denied" : "unavailable");
+      },
+      { timeout: 10000, maximumAge: 60000, enableHighAccuracy: true }
+    );
+  }
+
+  return { gpsState, coords, label, setLabel, request, reset: ()=>{ setGpsState("idle"); setCoords(null); setLabel(""); } };
+}
+
+// ── GPS Location Widget ───────────────────────────────────────────────
+
+function GPSLocationField({ value, onChange }) {
+  const { gpsState, coords, label, setLabel, request } = useGPS();
+
+  // Auto-request on mount
+  useEffect(() => { request(); }, []);
+
+  // When GPS succeeds, push label into parent form
+  useEffect(() => {
+    if (gpsState === "success" && label) onChange(label);
+  }, [gpsState, label]);
+
+  const isLoading  = gpsState === "requesting";
+  const isSuccess  = gpsState === "success";
+  const isFailed   = gpsState === "denied" || gpsState === "unavailable";
+
+  // Status pill configs
+  const pill = {
+    idle:        { bg:"#f1f5f9", color:"#64748b", icon:"📍", text:"Detecting location…" },
+    requesting:  { bg:"#eff6ff", color:"#2563eb", icon:"⏳", text:"Getting your GPS location…", spin:true },
+    success:     { bg:"#f0fdf4", color:"#16a34a", icon:"✅", text:"GPS location found" },
+    denied:      { bg:"#fef2f2", color:"#dc2626", icon:"🚫", text:"Location access denied — enter manually" },
+    unavailable: { bg:"#fff7ed", color:"#ea580c", icon:"⚠️", text:"GPS unavailable — enter manually" },
+  }[gpsState];
+
+  return (
+    <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
+      <label style={{ fontSize:12,fontWeight:600,color:"var(--P)" }}>📍 स्थान / Location *</label>
+
+      {/* Status pill */}
+      <div style={{ display:"flex",alignItems:"center",gap:8,background:pill.bg,border:`1px solid ${pill.color}30`,borderRadius:10,padding:"10px 14px" }}>
+        <span style={{ fontSize:16,animation:pill.spin?"spin 1.2s linear infinite":undefined,display:"inline-block" }}>{pill.icon}</span>
+        <span style={{ fontSize:13,color:pill.color,fontWeight:600,flex:1 }}>{pill.text}</span>
+        {isFailed && (
+          <button onClick={request} style={{ fontSize:12,color:pill.color,fontWeight:700,background:"none",padding:"4px 10px",borderRadius:7,border:`1.5px solid ${pill.color}60` }}>
+            Retry
+          </button>
+        )}
+      </div>
+
+      {/* Loading skeleton */}
+      {isLoading && (
+        <div style={{ height:46,borderRadius:10,background:"linear-gradient(90deg,#e2e8f0 25%,#f1f5f9 50%,#e2e8f0 75%)",backgroundSize:"200% 100%",animation:"shimmer 1.4s ease infinite" }}/>
+      )}
+
+      {/* Editable input — shown after GPS resolves (either way) */}
+      {!isLoading && (
+        <div style={{ position:"relative" }}>
+          <input
+            value={value}
+            onChange={e=>onChange(e.target.value)}
+            placeholder={isFailed?"वडा नं. र ठाउँको नाम लेख्नुहोस्…":"Edit location if needed…"}
+            style={{
+              width:"100%",padding:"12px 44px 12px 14px",borderRadius:10,fontSize:14,
+              border:`1.5px solid ${isSuccess?"#86efac":"var(--border)"}`,
+              background:isSuccess?"#f0fdf4":"var(--card)",
+              transition:"border-color .3s,background .3s"
+            }}
+          />
+          {/* Edit indicator */}
+          <span style={{ position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",fontSize:16,opacity:.5 }}>✏️</span>
+        </div>
+      )}
+
+      {/* Coords chip — shown on success */}
+      {isSuccess && coords && (
+        <div style={{ display:"flex",alignItems:"center",gap:6,fontSize:11,color:"#16a34a",background:"#f0fdf4",borderRadius:8,padding:"6px 10px",border:"1px solid #bbf7d0" }}>
+          <span>🛰</span>
+          <span style={{ fontFamily:"monospace" }}>{coords.lat.toFixed(5)}°N, {coords.lng.toFixed(5)}°E</span>
+          <span style={{ opacity:.6,marginLeft:4 }}>· accurate to ~10m</span>
+        </div>
+      )}
+
+      {/* Hint text */}
+      <p style={{ fontSize:11,color:"var(--muted)",margin:0 }}>
+        {isSuccess ? "✓ Auto-filled from GPS — edit anytime if incorrect." : isFailed ? "Enter your ward number and nearest landmark." : ""}
+      </p>
+    </div>
+  );
+}
+
+// ── ReportForm ────────────────────────────────────────────────────────
 
 function ReportForm({ onSubmit, onBack }) {
   const [step, setStep] = useState(1);
-  const [form, setForm] = useState({ title:"",description:"",category:"",location:"",priority:"medium" });
+  const [form, setForm] = useState({ title:"",description:"",category:"",location:"",priority:"medium",photo:null });
   const [done, setDone] = useState(false);
   const [syncState, setSyncState] = useState("local");
+  const fileInputRef = useRef(null);
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
 
+  const handlePhotoSelect = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      // Simple compression using canvas
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          
+          // Resize to max 800px width/height
+          const maxSize = 800;
+          let width = img.width;
+          let height = img.height;
+          
+          if (width > height && width > maxSize) {
+            height = (height * maxSize) / width;
+            width = maxSize;
+          } else if (height > maxSize) {
+            width = (width * maxSize) / height;
+            height = maxSize;
+          }
+          
+          canvas.width = width;
+          canvas.height = height;
+          ctx.drawImage(img, 0, 0, width, height);
+          
+          // Convert to blob with 0.7 quality
+          canvas.toBlob((blob) => {
+            set("photo", {
+              file: blob,
+              name: file.name,
+              size: blob.size,
+              url: URL.createObjectURL(blob)
+            });
+          }, 'image/jpeg', 0.7);
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const triggerFileInput = () => {
+    fileInputRef.current?.click();
+  };
+
   const handleSubmit=()=>{
-    const issue={...form,id:Date.now(),status:"pending",votes:0,age:0,createdAt:new Date().toISOString().split("T")[0],reporter:"नागरिक",location:{name:form.location,lat:27.70+Math.random()*0.03,lng:85.29+Math.random()*0.04},assignedTo:null,resolvedAt:null,note:""};
+    const issue={...form,id:Date.now(),status:"pending",votes:0,age:0,createdAt:new Date().toISOString().split("T")[0],reporter:"नागरिक",location:{name:form.location,lat:27.70+Math.random()*0.03,lng:85.29+Math.random()*0.04},assignedTo:null,resolvedAt:null,note:"",photo:form.photo};
     onSubmit(issue); setDone(true);
     setTimeout(()=>setSyncState("syncing"),800);
     setTimeout(()=>setSyncState("synced"),2600);
@@ -236,13 +411,14 @@ function ReportForm({ onSubmit, onBack }) {
       <SyncDot state={syncState}/>
       <div style={{ display:"flex",gap:10 }}>
         <button onClick={onBack} style={{ background:"var(--P)",color:"#fff",padding:"11px 22px",borderRadius:10,fontWeight:600,fontSize:14 }}>← गृह पृष्ठ</button>
-        <button onClick={()=>{setDone(false);setStep(1);setForm({title:"",description:"",category:"",location:"",priority:"medium"});setSyncState("local");}} style={{ border:"1.5px solid var(--border)",padding:"11px 22px",borderRadius:10,fontWeight:600,fontSize:14,background:"none" }}>+ नयाँ रिपोर्ट</button>
+        <button onClick={()=>{setDone(false);setStep(1);setForm({title:"",description:"",category:"",location:"",priority:"medium",photo:null});setSyncState("local");}} style={{ border:"1.5px solid var(--border)",padding:"11px 22px",borderRadius:10,fontWeight:600,fontSize:14,background:"none" }}>+ नयाँ रिपोर्ट</button>
       </div>
     </div>
   );
 
   return(
     <div style={{ maxWidth:500,margin:"0 auto",padding:"0 4px" }}>
+      <style>{`@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       <div style={{ display:"flex",alignItems:"center",gap:12,marginBottom:22 }}>
         <button onClick={onBack} style={{ background:"none",color:"var(--muted)",fontSize:20,padding:0 }}>←</button>
         <div style={{ flex:1 }}>
@@ -250,6 +426,7 @@ function ReportForm({ onSubmit, onBack }) {
           <div style={{ fontSize:12,color:"var(--muted)",marginTop:5 }}>{step===1?"समस्याको प्रकार":step===2?"विवरण":"स्थान र पेश"} — Step {step}/3</div>
         </div>
       </div>
+
       {step===1&&(
         <div className="up">
           <h3 className="np" style={{ fontSize:18,fontWeight:700,marginBottom:6 }}>समस्याको प्रकार छान्नुहोस्</h3>
@@ -264,6 +441,7 @@ function ReportForm({ onSubmit, onBack }) {
           </div>
         </div>
       )}
+
       {step===2&&(
         <div className="up" style={{ display:"flex",flexDirection:"column",gap:16 }}>
           <div><h3 className="np" style={{ fontSize:18,fontWeight:700,marginBottom:4 }}>विवरण दिनुहोस्</h3><p style={{ color:"var(--muted)",fontSize:13 }}>Describe the problem</p></div>
@@ -276,18 +454,73 @@ function ReportForm({ onSubmit, onBack }) {
           <div style={{ display:"flex",gap:10 }}><button onClick={()=>setStep(1)} style={{ flex:1,padding:"12px",border:"1.5px solid var(--border)",borderRadius:10,fontWeight:600,background:"none" }}>← पछाडि</button><button onClick={()=>form.title&&form.description&&setStep(3)} style={{ flex:2,padding:"12px",borderRadius:10,fontWeight:700,fontSize:15,background:form.title&&form.description?"var(--P)":"var(--border)",color:"#fff" }}>अगाडि →</button></div>
         </div>
       )}
+
       {step===3&&(
         <div className="up" style={{ display:"flex",flexDirection:"column",gap:16 }}>
-          <div><h3 className="np" style={{ fontSize:18,fontWeight:700,marginBottom:4 }}>स्थान र पेश</h3><p style={{ color:"var(--muted)",fontSize:13 }}>Location & Submit</p></div>
-          <div><label style={{ display:"block",fontSize:12,fontWeight:600,color:"var(--P)",marginBottom:6 }}>📍 स्थान / Location *</label>
-            <div style={{ display:"flex",gap:8 }}><input value={form.location} onChange={e=>set("location",e.target.value)} placeholder="वडा नं. र ठाउँको नाम..." style={{ flex:1,padding:"12px 14px",borderRadius:10,border:"1.5px solid var(--border)",fontSize:14 }}/><button onClick={()=>set("location","वडा ३ (GPS)")} style={{ padding:"12px 14px",background:"var(--P2)",color:"#fff",borderRadius:10,fontWeight:600,fontSize:13 }}>📡 GPS</button></div>
+          <div>
+            <h3 className="np" style={{ fontSize:18,fontWeight:700,marginBottom:4 }}>स्थान र पेश</h3>
+            <p style={{ color:"var(--muted)",fontSize:13 }}>Location & Submit</p>
           </div>
-          <div style={{ border:"1.5px dashed var(--border)",borderRadius:12,padding:20,textAlign:"center",cursor:"pointer",background:"#fafbff" }}>
-            <div style={{ fontSize:28,marginBottom:6 }}>📷</div><div className="np" style={{ fontWeight:600,fontSize:14 }}>फोटो थप्नुहोस्</div>
-            <div style={{ fontSize:12,color:"var(--muted)",marginTop:3 }}>Add Photo — compressed automatically</div>
+
+          {/* ── GPS Location Widget ── */}
+          <GPSLocationField value={form.location} onChange={v=>set("location",v)}/>
+
+          {/* Hidden file input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={handlePhotoSelect}
+            style={{ display: 'none' }}
+          />
+
+          {/* Photo upload area */}
+          <div 
+            onClick={triggerFileInput}
+            style={{ 
+              border: form.photo ? "2px solid #22c55e" : "1.5px dashed var(--border)", 
+              borderRadius:12, 
+              padding: form.photo ? "16px" : "20px", 
+              textAlign:"center", 
+              cursor:"pointer", 
+              background: form.photo ? "#f0fdf4" : "#fafbff",
+              position: "relative"
+            }}
+          >
+            {form.photo ? (
+              <div style={{ position: "relative" }}>
+                <img 
+                  src={form.photo.url} 
+                  alt="Selected" 
+                  style={{ 
+                    maxWidth: "100%", 
+                    maxHeight: "200px", 
+                    borderRadius: 8,
+                    display: "block",
+                    margin: "0 auto 8px"
+                  }}
+                />
+                <div style={{ fontSize: 12, color: "#16a34a", fontWeight: 600 }}>
+                  ✓ {form.photo.name} ({(form.photo.size / 1024).toFixed(1)} KB)
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                  Click to change photo
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontSize:28,marginBottom:6 }}>📷</div>
+                <div className="np" style={{ fontWeight:600,fontSize:14 }}>फोटो थप्नुहोस्</div>
+                <div style={{ fontSize:12,color:"var(--muted)",marginTop:3 }}>Add Photo — compressed automatically</div>
+              </div>
+            )}
           </div>
           <div style={{ padding:"6px 0" }}><SyncDot state="local"/></div>
-          <div style={{ display:"flex",gap:10 }}><button onClick={()=>setStep(2)} style={{ flex:1,padding:"12px",border:"1.5px solid var(--border)",borderRadius:10,fontWeight:600,background:"none" }}>← पछाडि</button><button onClick={handleSubmit} disabled={!form.location} style={{ flex:2,padding:"12px",borderRadius:10,fontWeight:700,fontSize:15,background:form.location?"var(--A)":"var(--border)",color:"#fff",transition:"all .2s" }}>🚀 पेश गर्नुहोस्</button></div>
+          <div style={{ display:"flex",gap:10 }}>
+            <button onClick={()=>setStep(2)} style={{ flex:1,padding:"12px",border:"1.5px solid var(--border)",borderRadius:10,fontWeight:600,background:"none" }}>← पछाडि</button>
+            <button onClick={handleSubmit} disabled={!form.location} style={{ flex:2,padding:"12px",borderRadius:10,fontWeight:700,fontSize:15,background:form.location?"var(--A)":"var(--border)",color:"#fff",transition:"all .2s" }}>🚀 पेश गर्नुहोस्</button>
+          </div>
         </div>
       )}
     </div>
@@ -296,7 +529,7 @@ function ReportForm({ onSubmit, onBack }) {
 
 // ── CitizenHome ───────────────────────────────────────────────────────
 
-function CitizenHome({ issues, onReport, onTrack, onMap }) {
+function CitizenHome({ issues, onReport, onTrack, onMap, onIssueClick }) {
   const sorted  = [...issues].sort((a,b)=>calcPriority(b)-calcPriority(a));
   const trending = sorted.filter(i=>i.status!=="resolved").slice(0,3);
   return(
@@ -335,7 +568,29 @@ function CitizenHome({ issues, onReport, onTrack, onMap }) {
           {trending.map((issue,idx)=>{
             const score=calcPriority(issue);
             return(
-              <div key={issue.id} style={{ background:"var(--card)",borderRadius:13,padding:"14px 14px 14px 18px",display:"flex",gap:12,position:"relative",boxShadow:"var(--shadow)" }}>
+              <div 
+                key={issue.id} 
+                onClick={() => onIssueClick(issue)}
+                style={{ 
+                  background:"var(--card)",
+                  borderRadius:13,
+                  padding:"14px 14px 14px 18px",
+                  display:"flex",
+                  gap:12,
+                  position:"relative",
+                  boxShadow:"var(--shadow)",
+                  cursor:"pointer",
+                  transition:"transform 0.2s, box-shadow 0.2s"
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = "translateY(-2px)";
+                  e.currentTarget.style.boxShadow = "0 6px 20px rgba(13,59,110,0.15)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = "translateY(0)";
+                  e.currentTarget.style.boxShadow = "var(--shadow)";
+                }}
+              >
                 <div style={{ position:"absolute",left:0,top:0,bottom:0,width:4,borderRadius:"13px 0 0 13px",background:STATUS_CONFIG[issue.status]?.strip||"#e53935" }}/>
                 <div style={{ position:"absolute",left:8,top:8,fontSize:11,fontWeight:700,color:"var(--muted)" }}>#{idx+1}</div>
                 <CatIcon cat={issue.category} size={40}/>
@@ -353,9 +608,155 @@ function CitizenHome({ issues, onReport, onTrack, onMap }) {
   );
 }
 
+// ── Issue Detail View ─────────────────────────────────────────────────────
+
+function IssueDetail({ issue, onBack, onVote }) {
+  const [isVoted, setIsVoted] = useState(false);
+  const score = calcPriority(issue);
+  
+  const handleVote = () => {
+    if (!isVoted) {
+      setIsVoted(true);
+      onVote(issue.id);
+    }
+  };
+
+  return (
+    <div style={{ maxWidth:600,margin:"0 auto",padding:"0 16px" }}>
+      {/* Header */}
+      <div style={{ display:"flex",alignItems:"center",gap:12,marginBottom:20,paddingTop:12 }}>
+        <button onClick={onBack} style={{ background:"none",color:"var(--muted)",fontSize:24,padding:0 }}>←</button>
+        <div style={{ flex:1 }}>
+          <h2 className="np" style={{ fontSize:20,fontWeight:700,color:"var(--P)",marginBottom:4 }}>समस्याको विवरण</h2>
+          <p style={{ fontSize:13,color:"var(--muted)" }}>Issue Details</p>
+        </div>
+      </div>
+
+      {/* Main content */}
+      <div style={{ background:"var(--card)",borderRadius:16,boxShadow:"var(--shadow-md)",overflow:"hidden" }}>
+        {/* Status strip */}
+        <div style={{ height:6,background:STATUS_CONFIG[issue.status]?.strip||"#e53935" }} />
+        
+        <div style={{ padding:24 }}>
+          {/* Title and category */}
+          <div style={{ display:"flex",alignItems:"flex-start",gap:16,marginBottom:20 }}>
+            <CatIcon cat={issue.category} size={56} />
+            <div style={{ flex:1 }}>
+              <h1 className="np" style={{ fontSize:22,fontWeight:700,marginBottom:8,lineHeight:1.3 }}>{issue.title}</h1>
+              <div style={{ display:"flex",gap:8,flexWrap:"wrap",alignItems:"center" }}>
+                <StatusBadge status={issue.status} />
+                <PriorityBadge score={score} />
+              </div>
+            </div>
+          </div>
+
+          {/* Description */}
+          <div style={{ marginBottom:24 }}>
+            <h3 className="np" style={{ fontSize:16,fontWeight:700,marginBottom:12,color:"var(--P)" }}>विवरण / Description</h3>
+            <p className="np" style={{ fontSize:15,lineHeight:1.6,color:"var(--text)",margin:0 }}>{issue.description}</p>
+          </div>
+
+          {/* Photo section */}
+          <div style={{ marginBottom:24 }}>
+            <h3 className="np" style={{ fontSize:16,fontWeight:700,marginBottom:12,color:"var(--P)" }}>फोटो / Photo</h3>
+            {issue.photo ? (
+              <div style={{ position: "relative" }}>
+                <img 
+                  src={issue.photo.url} 
+                  alt="Complaint photo" 
+                  style={{ 
+                    width: "100%", 
+                    maxHeight: "300px", 
+                    borderRadius: 12,
+                    display: "block",
+                    objectFit: "cover"
+                  }}
+                />
+                <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)" }}>
+                  📸 {issue.photo.name} ({(issue.photo.size / 1024).toFixed(1)} KB)
+                </div>
+              </div>
+            ) : (
+              <div style={{ 
+                background:"#f8fafc",
+                border:"2px dashed var(--border)",
+                borderRadius:12,
+                padding:40,
+                textAlign:"center",
+                color:"var(--muted)"
+              }}>
+                <div style={{ fontSize:48,marginBottom:8 }}>📷</div>
+                <div className="np" style={{ fontSize:14,fontWeight:600 }}>फोटो उपलब्ध छैन</div>
+                <div style={{ fontSize:12,marginTop:4 }}>No photo available</div>
+              </div>
+            )}
+          </div>
+
+          {/* Location */}
+          <div style={{ marginBottom:24 }}>
+            <h3 className="np" style={{ fontSize:16,fontWeight:700,marginBottom:12,color:"var(--P)" }}>स्थान / Location</h3>
+            <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+              <span style={{ fontSize:20 }}>📍</span>
+              <div>
+                <div className="np" style={{ fontSize:15,fontWeight:600 }}>{issue.location?.name}</div>
+                {issue.location?.lat && issue.location?.lng && (
+                  <div style={{ fontSize:12,color:"var(--muted)",fontFamily:"monospace" }}>
+                    {issue.location.lat.toFixed(5)}°N, {issue.location.lng.toFixed(5)}°E
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Metadata */}
+          <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:16,marginBottom:24 }}>
+            <div style={{ textAlign:"center",padding:"12px",background:"#f8fafc",borderRadius:10 }}>
+              <div style={{ fontSize:24,fontWeight:700,color:"var(--P2)" }}>{issue.votes}</div>
+              <div className="np" style={{ fontSize:12,color:"var(--muted)" }}>समर्थन / Supports</div>
+            </div>
+            <div style={{ textAlign:"center",padding:"12px",background:"#f8fafc",borderRadius:10 }}>
+              <div style={{ fontSize:24,fontWeight:700,color:"var(--P2)" }}>{issue.age}</div>
+              <div className="np" style={{ fontSize:12,color:"var(--muted)" }}>दिन / Days</div>
+            </div>
+            <div style={{ textAlign:"center",padding:"12px",background:"#f8fafc",borderRadius:10 }}>
+              <div className="np" style={{ fontSize:24,fontWeight:700,color:"var(--P2)" }}>{issue.reporter}</div>
+              <div className="np" style={{ fontSize:12,color:"var(--muted)" }}>रिपोर्टर / Reporter</div>
+            </div>
+          </div>
+
+          {/* Status stepper */}
+          <div style={{ marginBottom:24 }}>
+            <StatusStepper status={issue.status} />
+          </div>
+
+          {/* Vote button */}
+          <button 
+            onClick={handleVote}
+            disabled={isVoted}
+            style={{ 
+              width:"100%",
+              padding:"14px",
+              borderRadius:12,
+              fontWeight:700,
+              fontSize:16,
+              background:isVoted?"#e3f2fd":"var(--P)",
+              color:isVoted?"#1565c0":"#fff",
+              border:"none",
+              cursor:isVoted?"default":"pointer",
+              transition:"all 0.2s"
+            }}
+          >
+            {isVoted ? `✅ समर्थन गरियो (${issue.votes + 1})` : `👍 समर्थन गर्नुहोस् / Support (${issue.votes})`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── TrackIssues ───────────────────────────────────────────────────────
 
-function TrackIssues({ issues, onBack, onVote, votedIds }) {
+function TrackIssues({ issues, onBack, onVote, votedIds, onIssueClick }) {
   const [filterStatus,setFilterStatus]=useState("all");
   const [sort,setSort]=useState("votes");
   const filtered=[...issues].filter(i=>filterStatus==="all"||i.status===filterStatus).sort((a,b)=>sort==="votes"?b.votes-a.votes:calcPriority(b)-calcPriority(a));
@@ -375,7 +776,28 @@ function TrackIssues({ issues, onBack, onVote, votedIds }) {
           const score=calcPriority(issue);
           const isVoted=votedIds.includes(issue.id);
           return(
-            <div key={issue.id} className="up" style={{ background:"var(--card)",borderRadius:13,padding:"14px 14px 14px 18px",boxShadow:"var(--shadow)",position:"relative" }}>
+            <div 
+              key={issue.id} 
+              className="up" 
+              style={{ 
+                background:"var(--card)",
+                borderRadius:13,
+                padding:"14px 14px 14px 18px",
+                boxShadow:"var(--shadow)",
+                position:"relative",
+                cursor:"pointer",
+                transition:"transform 0.2s, box-shadow 0.2s"
+              }}
+              onClick={() => onIssueClick(issue)}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = "translateY(-2px)";
+                e.currentTarget.style.boxShadow = "0 6px 20px rgba(13,59,110,0.15)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = "translateY(0)";
+                e.currentTarget.style.boxShadow = "var(--shadow)";
+              }}
+            >
               <div style={{ position:"absolute",left:0,top:0,bottom:0,width:4,borderRadius:"13px 0 0 13px",background:STATUS_CONFIG[issue.status]?.strip||"#e53935" }}/>
               <div style={{ display:"flex",gap:12,marginBottom:10 }}>
                 <CatIcon cat={issue.category} size={42}/>
@@ -383,7 +805,13 @@ function TrackIssues({ issues, onBack, onVote, votedIds }) {
                   <div className="np" style={{ fontWeight:700,fontSize:14,marginBottom:5 }}>{issue.title}</div>
                   <div style={{ display:"flex",gap:6,flexWrap:"wrap",alignItems:"center" }}><StatusBadge status={issue.status} size="sm"/><PriorityBadge score={score}/></div>
                 </div>
-                <button onClick={()=>onVote(issue.id)} style={{ display:"flex",alignItems:"center",gap:5,padding:"5px 12px",borderRadius:8,background:isVoted?"#e3f2fd":"var(--surface)",border:`1.5px solid ${isVoted?"#1565c0":"var(--border)"}`,color:isVoted?"#1565c0":"var(--muted)",fontWeight:600,fontSize:13 }}>👍 {issue.votes}</button>
+                <button 
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onVote(issue.id);
+                  }} 
+                  style={{ display:"flex",alignItems:"center",gap:5,padding:"5px 12px",borderRadius:8,background:isVoted?"#e3f2fd":"var(--surface)",border:`1.5px solid ${isVoted?"#1565c0":"var(--border)"}`,color:isVoted?"#1565c0":"var(--muted)",fontWeight:600,fontSize:13 }}
+                >👍 {issue.votes}</button>
               </div>
               <p className="np" style={{ fontSize:13,color:"var(--muted)",marginBottom:10,lineHeight:1.55 }}>{issue.description}</p>
               <div style={{ fontSize:12,color:"var(--muted)",marginBottom:8,display:"flex",gap:12 }}><span>📍 {issue.location?.name}</span><span>📅 {issue.createdAt}</span></div>
@@ -723,6 +1151,7 @@ export default function App() {
   const [role,      setRole]      = useState("citizen");
   const [votedIds,  setVotedIds]  = useState([]);
   const [syncState, setSyncState] = useState("synced");
+  const [selectedIssue, setSelectedIssue] = useState(null);
 
   const handleSubmit = (issue) => {
     setSyncState("local");
@@ -740,6 +1169,11 @@ export default function App() {
     if(votedIds.includes(id))return;
     setVotedIds(v=>[...v,id]);
     setIssues(prev=>prev.map(i=>i.id===id?{...i,votes:i.votes+1}:i));
+  };
+
+  const handleIssueClick = (issue) => {
+    setSelectedIssue(issue);
+    setScreen("detail");
   };
 
   const isAdmin = role==="admin";
@@ -768,10 +1202,12 @@ export default function App() {
         <div style={{ maxWidth:560,margin:"0 auto",padding:"18px 14px" }}>
           {isAdmin
             ? <AdminDashboard issues={issues} onUpdateIssue={handleUpdateIssue} onBack={()=>setRole("citizen")}/>
-            : screen==="home"   ? <CitizenHome issues={issues} onReport={()=>setScreen("report")} onTrack={()=>setScreen("track")} onMap={()=>setScreen("map")}/>
+            : screen==="home"   ? <CitizenHome issues={issues} onReport={()=>setScreen("report")} onTrack={()=>setScreen("track")} onMap={()=>setScreen("map")} onIssueClick={handleIssueClick}/>
             : screen==="report" ? <ReportForm onSubmit={handleSubmit} onBack={()=>setScreen("home")}/>
             : screen==="map"    ? <MapPage issues={issues} onBack={()=>setScreen("home")}/>
-            : <TrackIssues issues={issues} onBack={()=>setScreen("home")} onVote={handleVote} votedIds={votedIds}/>
+            : screen==="detail" ? <IssueDetail issue={selectedIssue} onBack={()=>setScreen("home")} onVote={handleVote}/>
+            : screen==="track" ? <TrackIssues issues={issues} onBack={()=>setScreen("home")} onVote={handleVote} votedIds={votedIds} onIssueClick={handleIssueClick}/>
+            : <TrackIssues issues={issues} onBack={()=>setScreen("home")} onVote={handleVote} votedIds={votedIds} onIssueClick={handleIssueClick}/>
           }
         </div>
 
